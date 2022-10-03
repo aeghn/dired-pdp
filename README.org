@@ -1,1 +1,3 @@
 dired with parent-directory-preview view.
+
+[[./preview.png]]
