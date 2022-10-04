@@ -93,9 +93,6 @@ with preview"
 (defvar dired-pdp-last-filename nil
   "The file is previewing now.")
 
-(defvar dired-pdp-cancel-change-magic nil
-  "The var will prevent change the change once.")
-
 (defun dired-pdp--make-icon-variables ()
   (dolist (e dired-pdp-dired-icons)
     (let* ((name (format "dired-pdp--icon-%s" (car e)))
@@ -138,7 +135,7 @@ with preview"
          (preview-width   (/ (* total-width 40) 100))
          (info-width      (/ (* total-width 24) 100))
          (f (make-symbol "dired-pdp--resize-by-right")))
-    (setf f (lambda (window width)
+    (fset f (lambda (window width)
               (let* ((old-width (window-width window t))
                      (delta (- width old-width)))
                 (adjust-window-trailing-edge window delta t t))))
@@ -219,6 +216,7 @@ with preview"
           (dired-pdp-update-dired-mode-line)
           (dired-pdp-hide-dired-header)
           (dired-pdp-add-icons-for-dired)
+          (dired-pdp--set-post-command-hook)
           (dired-pdp-set-buffer-face-mode ibuffer-sidebar-face))))))
 
 (defun dired-pdp-get-dir-by-item (str)
@@ -295,7 +293,7 @@ with preview"
     ))
 
 (defun dired-pdp-preview (filename)
-  (let* ((file-type (dired-pdp-get-file-type filename t))
+  (let* ((file-type (dired--pdp-get-file-type filename t))
          (file-attrs (file-attributes filename)))
     (dired-pdp--update-info-window file-type file-attrs)
     (dired-pdp-ignore-errors
@@ -380,7 +378,7 @@ with preview"
       (setq buffer-read-only t))
     buffer))
 
-(defun dired-pdp-get-file-type (filename &optional brief)
+(defun dired--pdp-get-file-type (filename &optional brief)
   (let* ((file-type (dired-show-file-type filename)))
     (if brief (replace-regexp-in-string (concat (regexp-quote filename) ": ?") "" file-type)
       file-type)))
@@ -399,7 +397,9 @@ with preview"
 ;;;###autoload
 (defun dired-pdp (filename)
   (interactive "f")
-  (when-let* ((filename (if (file-exists-p filename) filename nil))
+  (when-let* ((filename (if (file-exists-p filename)
+                            (expand-file-name filename)
+                          nil))
               (dirpath (dired-pdp-get-dir-by-item filename)))
     (setq dired-pdp-current-filename filename)
     (dired-pdp--build-windows)
@@ -469,18 +469,19 @@ with preview"
                   ,count "]"))))
 
 (defun dired-pdp-update-current-filename-by-dired ()
-  (when (and (eq major-mode 'dired)
-             (= (point) (point-max))
-             (not (dired-get-filename nil t)))
-    (dired-previous-line 1))
-  (let ((filename (dired-get-filename nil t)))
-    (when filename (dired-pdp-hl-current-dired-line (selected-window)))
+  (when-let ((_ (eq major-mode 'dired-mode))
+             (filename (dired-get-filename nil t)))
+    (dired-pdp-hl-current-dired-line (selected-window))
     (dired-pdp-update-current-filename filename)))
 
 (defun dired-pdp-update-current-filename (filename &optional refresh)
-  (when (and filename (not (string= filename dired-pdp-current-filename)))
-    (setq dired-pdp-current-filename (expand-file-name filename))
-    (when refresh (dired-pdp-refresh))))
+  (let ((has-slash (string-suffix-p "/" filename))
+        (filename (expand-file-name filename)))
+    (when has-slash
+      (setq filename (dired-pdp-append-slash-for-dir filename)))
+    (when (and filename (not (string= filename dired-pdp-current-filename)))
+      (setq dired-pdp-current-filename filename)
+      (when refresh (dired-pdp-refresh)))))
 
 (defun dired-pdp-refresh ()
   (let ((filename dired-pdp-current-filename))
@@ -541,18 +542,18 @@ with preview"
       (concat filename "/")
     filename))
 
+
 (defun dired-pdp-goto-current ()
   (interactive)
-  (let* ((file (dired-pdp-append-slash-for-dir dired-pdp-current-filename)))
-    (cond ((file-directory-p file)
-           (dired-pdp-update-current-filename
-            (dired-pdp-append-slash-for-dir file)))
-          (t (message "This is a file: %s" file)))))
+  (let* ((filename dired-pdp-current-filename))
+    (if (file-directory-p filename)
+        (dired-pdp-update-current-filename (dired-pdp-append-slash-for-dir filename))
+      (message "This is a file: %s" filename))))
 
 (defun dired-pdp-set-common-keymap (&optional buffer)
   (let ((f (make-symbol "dired-pdp-select-window-keybinding"))
         (buffer (if buffer buffer (window-buffer))))
-    (setf f
+    (fset f
           (lambda (key window)
             (interactive)
             (keymap-local-set
@@ -568,24 +569,24 @@ with preview"
       (funcall f "M-<up>" dired-pdp-path-window))))
 
 (defun dired-pdp-set-directory-keymap (&optional buffer)
-  (with-current-buffer (if buffer buffer (window-buffer))
-    (keymap-local-set "<right>" 'dired-pdp-goto-current)
-    (keymap-local-set "<left>" 'dired-pdp-goto-parent)
-    (keymap-local-set
-     "<up>"
-     (lambda ()
-       (interactive)
-       (dired-previous-line 1)
-       (dired-pdp-update-current-filename-by-dired)))
-    (keymap-local-set
-     "<down>"
-     (lambda ()
-       (interactive)
-       (let ((pos (point)))
-         (dired-next-line 1)
-         (when (and (eobp) (not (dired-get-filename nil t)))
-           (goto-char pos)))
-       (dired-pdp-update-current-filename-by-dired)))))
+  (let ((up-fun (make-symbol "dired-pdp-dired-up"))
+        (down-fun (make-symbol "dired-pdp-dired-down")))
+    (fset up-fun
+          (lambda () (interactive)
+            (dired-previous-line 1)
+            (dired-pdp-update-current-filename-by-dired)))
+    (fset down-fun
+          (lambda () (interactive)
+            (let ((pos (point)))
+              (dired-next-line 1)
+              (when (and (eobp) (not (dired-get-filename nil t)))
+                (goto-char pos)))
+            (dired-pdp-update-current-filename-by-dired)))
+    (with-current-buffer (if buffer buffer (window-buffer))
+      (keymap-local-set "<right>" 'dired-pdp-goto-current)
+      (keymap-local-set "<left>" 'dired-pdp-goto-parent)
+      (keymap-local-set "<up>" up-fun)
+      (keymap-local-set "<down>" down-fun))))
 
 (defun dired-pdp-add-icons-for-dired ()
   (save-excursion
@@ -726,6 +727,17 @@ with preview"
           window-pixel-width file-type file-attrs)
          (goto-char (point-min)))))))
 
+(defun dired-pdp--set-post-command-hook ()
+  (let ((f (make-symbol "dired-pdp--post-command-trigger")))
+    (fset f (lambda ()
+              (let ((cmd (format "%s" this-command)))
+                (when (and (equal (selected-window) dired-pdp-directory-window)
+                           (or (string-prefix-p "dired" cmd)
+                               (string-prefix-p "mouse" cmd))
+                           (not (string-prefix-p "dired-pdp" cmd)))
+                  (dired-pdp-update-current-filename-by-dired)))))
+    (add-hook 'post-command-hook f nil t)))
+
 (defun dired-pdp--insert-info-center-icon (icon window-pixel-width)
   (let ((icon (propertize (if icon icon "")
                           'face
@@ -740,7 +752,6 @@ with preview"
     (insert " ")
     (setq space-width (dired-pdp--line-width-here)
           half-count (/ (- window-pixel-width icon-width) 2 space-width))
-    (message "centericon %s %s %s %s" window-pixel-width half-count space-width icon-width)
     (insert (make-string half-count ? ))
     (goto-char (line-end-position))))
 
